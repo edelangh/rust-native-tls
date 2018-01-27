@@ -85,6 +85,10 @@ impl Certificate {
         let cert = try!(X509::from_der(buf));
         Ok(Certificate(cert))
     }
+    pub fn from_pem(buf: &[u8]) -> Result<Certificate, Error> {
+        let cert = try!(X509::from_pem(buf));
+        Ok(Certificate(cert))
+    }
 }
 
 pub struct MidHandshakeTlsStream<S>(MidHandshakeSslStream<S>);
@@ -149,24 +153,23 @@ pub struct TlsConnectorBuilder(SslConnectorBuilder);
 
 impl TlsConnectorBuilder {
     pub fn identity(&mut self, pkcs12: Pkcs12) -> Result<(), Error> {
-        let ctx = self.0.builder_mut();
         // FIXME clear chain certs to clean up if called multiple times
-        try!(ctx.set_certificate(&pkcs12.0.cert));
-        try!(ctx.set_private_key(&pkcs12.0.pkey));
-        try!(ctx.check_private_key());
+        try!(self.0.set_certificate(&pkcs12.0.cert));
+        try!(self.0.set_private_key(&pkcs12.0.pkey));
+        try!(self.0.check_private_key());
         for cert in pkcs12.0.chain {
-            try!(ctx.add_extra_chain_cert(cert));
+            try!(self.0.add_extra_chain_cert(cert));
         }
         Ok(())
     }
 
     pub fn add_root_certificate(&mut self, cert: Certificate) -> Result<(), Error> {
-        try!(self.0.builder_mut().cert_store_mut().add_cert(cert.0));
+        try!(self.0.cert_store_mut().add_cert(cert.0));
         Ok(())
     }
 
     pub fn supported_protocols(&mut self, protocols: &[Protocol]) -> Result<(), Error> {
-        supported_protocols(protocols, self.0.builder_mut());
+        supported_protocols(protocols, &mut self.0);
         Ok(())
     }
 
@@ -253,7 +256,7 @@ pub struct TlsAcceptorBuilder(SslAcceptorBuilder);
 
 impl TlsAcceptorBuilder {
     pub fn supported_protocols(&mut self, protocols: &[Protocol]) -> Result<(), Error> {
-        supported_protocols(protocols, self.0.builder_mut());
+        supported_protocols(protocols, &mut self.0);
         Ok(())
     }
 

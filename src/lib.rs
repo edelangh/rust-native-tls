@@ -102,8 +102,12 @@
 //!     }
 //! }
 //! ```
-#![doc(html_root_url="https://docs.rs/native-tls/0.1.4")]
+#![doc(html_root_url="https://docs.rs/native-tls/0.1.5")]
 #![warn(missing_docs)]
+
+#[macro_use]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+extern crate lazy_static;
 
 use std::any::Any;
 use std::error;
@@ -114,20 +118,20 @@ use std::result;
 
 pub mod backend;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[path = "imp/security_framework.rs"]
 mod imp;
 #[cfg(target_os = "windows")]
 #[path = "imp/schannel.rs"]
 mod imp;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "ios")))]
 #[path = "imp/openssl.rs"]
 mod imp;
 
 #[cfg(test)]
 mod test;
 
-/// A typedef of the result type returned by many methods.
+/// A typedef of the result-type returned by many methods.
 pub type Result<T> = result::Result<T, Error>;
 
 /// An error returned from the TLS implementation.
@@ -190,6 +194,13 @@ impl Certificate {
     /// Parses a DER-formatted X509 certificate.
     pub fn from_der(der: &[u8]) -> Result<Certificate> {
         let cert = try!(imp::Certificate::from_der(der));
+        Ok(Certificate(cert))
+    }
+    /// Parses a PEM-formatted X509 certificate.
+    /// If the PEM file contains more than one certificate the last one is used
+    /// and the others are ignored.
+    pub fn from_pem(der: &[u8]) -> Result<Certificate> {
+        let cert = try!(imp::Certificate::from_pem(der));
         Ok(Certificate(cert))
     }
 }

@@ -95,6 +95,22 @@ impl Certificate {
         let cert = try!(CertContext::new(buf));
         Ok(Certificate(cert))
     }
+    pub fn from_pem(buf: &[u8]) -> Result<Certificate, Error> {
+        match ::std::str::from_utf8(buf) {
+            Ok(s) => {
+                let cert = try!(CertContext::from_pem(s));
+                Ok(Certificate(cert))
+            }
+            Err(_) => {
+                Err(
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "PEM representation contains non-UTF-8 bytes",
+                    ).into(),
+                )
+            }
+        }
+    }
 }
 
 pub struct MidHandshakeTlsStream<S>(tls_stream::MidHandshakeTlsStream<S>);
@@ -367,5 +383,17 @@ pub trait ErrorExt {
 impl ErrorExt for ::Error {
     fn schannel_error(&self) -> &io::Error {
         &(self.0).0
+    }
+}
+
+/// SChannel-specific extensions to `Certificate`.
+pub trait CertificateExt {
+    /// builds a native_Tls `Certificate` from an schannel `CertContext`
+    fn from_cert_context(CertContext) -> ::Certificate;
+}
+
+impl CertificateExt for ::Certificate {
+    fn from_cert_context(cert: CertContext) -> ::Certificate {
+        ::Certificate(Certificate(cert))
     }
 }

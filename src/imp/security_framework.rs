@@ -1,3 +1,4 @@
+extern crate libc;
 extern crate security_framework;
 extern crate security_framework_sys;
 extern crate tempdir;
@@ -5,17 +6,32 @@ extern crate tempdir;
 use self::security_framework::base;
 use self::security_framework::certificate::SecCertificate;
 use self::security_framework::identity::SecIdentity;
-use self::security_framework::import_export::Pkcs12ImportOptions;
+use self::security_framework::import_export::{Pkcs12ImportOptions, ImportedIdentityOptions};
 use self::security_framework::secure_transport::{self, SslContext, ProtocolSide, ConnectionType,
                                                  SslProtocol, ClientBuilder};
-use self::security_framework::os::macos::keychain::{self, KeychainSettings};
 use self::security_framework_sys::base::errSecIO;
 use self::tempdir::TempDir;
 use std::fmt;
 use std::io;
 use std::error;
+use std::sync::Mutex;
+use std::sync::{Once, ONCE_INIT};
+
+#[cfg(not(target_os = "ios"))]
+use self::security_framework::os::macos::keychain::{self, SecKeychain, KeychainSettings};
+#[cfg(not(target_os = "ios"))]
+use self::security_framework::os::macos::import_export::{SecItems, ImportOptions};
+#[cfg(not(target_os = "ios"))]
+use self::security_framework_sys::base::errSecParam;
 
 use Protocol;
+
+static SET_AT_EXIT: Once = ONCE_INIT;
+
+#[cfg(not(target_os = "ios"))]
+lazy_static! {
+    static ref TEMP_KEYCHAIN: Mutex<Option<(SecKeychain, TempDir)>> = Mutex::new(None);
+}
 
 fn convert_protocol(protocol: Protocol) -> SslProtocol {
     match protocol {
@@ -79,36 +95,71 @@ pub struct Pkcs12 {
 
 impl Pkcs12 {
     pub fn from_der(buf: &[u8], pass: &str) -> Result<Pkcs12, Error> {
-        let dir = match TempDir::new("native-tls") {
-            Ok(dir) => dir,
-            Err(_) => return Err(Error(base::Error::from(errSecIO))),
-        };
-
-        let mut keychain = try!(keychain::CreateOptions::new().password(pass).create(
-            dir.path().join("tmp.keychain"),
-        ));
-        // disable lock on sleep and timeouts
-        try!(keychain.set_settings(&KeychainSettings::new()));
-
-        let mut imports = try!(
-            Pkcs12ImportOptions::new()
-                .passphrase(pass)
-                .keychain(keychain)
-                .import(buf)
-        );
+        let mut imports = try!(Pkcs12::import_options(buf, pass));
         let import = imports.pop().unwrap();
 
+        let identity = import.identity.expect(
+            "Pkcs12 files must include an identity",
+        );
+
         // FIXME: Compare the certificates for equality using CFEqual
-        let identity_cert = try!(import.identity.certificate()).to_der();
+        let identity_cert = try!(identity.certificate()).to_der();
 
         Ok(Pkcs12 {
-            identity: import.identity,
+            identity: identity,
             chain: import
                 .cert_chain
+                .unwrap_or(vec![])
                 .into_iter()
                 .filter(|c| c.to_der() != identity_cert)
                 .collect(),
         })
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    fn import_options(buf: &[u8], pass: &str) -> Result<Vec<ImportedIdentityOptions>, Error> {
+        SET_AT_EXIT.call_once(|| {
+            extern "C" fn atexit() {
+                *TEMP_KEYCHAIN.lock().unwrap() = None;
+            }
+            unsafe {
+                libc::atexit(atexit);
+            }
+        });
+
+        let keychain = match *TEMP_KEYCHAIN.lock().unwrap() {
+            Some((ref keychain, _)) => keychain.clone(),
+            ref mut lock @ None => {
+                let dir = TempDir::new("native-tls").map_err(|_| {
+                    Error(base::Error::from(errSecIO))
+                })?;
+
+                let mut keychain = keychain::CreateOptions::new().password(pass).create(
+                    dir.path().join("tmp.keychain"),
+                )?;
+                keychain.set_settings(&KeychainSettings::new())?;
+
+                *lock = Some((keychain, dir));
+                lock.as_ref().unwrap().0.clone()
+            }
+        };
+        let imports = try!(
+            Pkcs12ImportOptions::new()
+                .passphrase(pass)
+                .keychain(keychain)
+                .import_optional(buf)
+        );
+        Ok(imports)
+    }
+
+    #[cfg(target_os = "ios")]
+    fn import_options(buf: &[u8], pass: &str) -> Result<Vec<ImportedIdentityOptions>, Error> {
+        let imports = try!(
+            Pkcs12ImportOptions::new()
+                .passphrase(pass)
+                .import_optional(buf)
+        );
+        Ok(imports)
     }
 }
 
@@ -118,6 +169,20 @@ impl Certificate {
     pub fn from_der(buf: &[u8]) -> Result<Certificate, Error> {
         let cert = try!(SecCertificate::from_der(buf));
         Ok(Certificate(cert))
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    pub fn from_pem(buf: &[u8]) -> Result<Certificate, Error> {
+        let mut items = SecItems::default();
+        try!(ImportOptions::new().items(&mut items).import(buf));
+        match items.certificates.pop() {
+            Some(cert) => Ok(Certificate(cert)),
+            None => Err(Error(base::Error::from(errSecParam))),
+        }
+    }
+    #[cfg(target_os = "ios")]
+    pub fn from_pem(buf: &[u8]) -> Result<Certificate, Error> {
+        panic!("Not implemented on iOS");
     }
 }
 
